@@ -1,0 +1,13 @@
+torch>=2.1.0
+torchvision
+diffusers>=0.31.0
+transformers>=4.44.0
+accelerate
+safetensors
+gradio>=4.0.0
+pillow
+numpy
+huggingface-hub
+bitsandbytes
+xformers
+requests
