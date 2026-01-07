@@ -27,7 +27,7 @@ module.exports = {
           return [{
             default: true,
             icon: "fa-solid fa-rocket",
-            text: "Play Tetris",
+            text: "Open FLUX.2 UI",
             href: local.url,
           }, {
             icon: 'fa-solid fa-terminal',

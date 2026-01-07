@@ -12,7 +12,7 @@ from diffusers import Flux2Pipeline
 from diffusers.utils import load_image
 from PIL import Image
 import numpy as np
-from huggingface_hub import get_token
+from huggingface_hub import get_token, login
 import requests
 import io
 
@@ -23,18 +23,24 @@ TORCH_DTYPE = torch.bfloat16
 
 # Global pipeline variable
 pipe = None
+hf_token = None  # Store HuggingFace token
 
-def remote_text_encoder(prompts):
+def remote_text_encoder(prompts, token=None):
     """
     Use remote text encoder to save VRAM.
     This offloads the large text encoder to HuggingFace's servers.
     """
     try:
+        # Use provided token, or try to get from environment
+        auth_token = token or hf_token or get_token()
+        if not auth_token:
+            raise Exception("No HuggingFace token provided. Please enter your token in the UI.")
+        
         response = requests.post(
             "https://remote-text-encoder-flux-2.huggingface.co/predict",
             json={"prompt": prompts if isinstance(prompts, list) else [prompts]},
             headers={
-                "Authorization": f"Bearer {get_token()}",
+                "Authorization": f"Bearer {auth_token}",
                 "Content-Type": "application/json"
             },
             timeout=30
@@ -42,16 +48,35 @@ def remote_text_encoder(prompts):
         prompt_embeds = torch.load(io.BytesIO(response.content))
         return prompt_embeds.to(DEVICE)
     except Exception as e:
-        raise Exception(f"Remote text encoder error: {str(e)}\nMake sure you're logged in with 'huggingface-cli login'")
+        raise Exception(f"Remote text encoder error: {str(e)}\nMake sure you've entered a valid HuggingFace token.")
 
-def initialize_pipeline():
+def initialize_pipeline(hf_token_input):
     """Initialize the FLUX.2 pipeline with optimizations for 24GB VRAM"""
-    global pipe
+    global pipe, hf_token
     
     if pipe is not None:
         return "Pipeline already initialized!"
     
+    # Validate token
+    if not hf_token_input or not hf_token_input.strip():
+        return "❌ Please enter your HuggingFace token first!\n\nGet your token from: https://huggingface.co/settings/tokens"
+    
     try:
+        # Store token globally
+        hf_token = hf_token_input.strip()
+        
+        # Set token in environment for huggingface_hub
+        os.environ["HF_TOKEN"] = hf_token
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
+        
+        # Login with the token
+        try:
+            login(token=hf_token, add_to_git_credential=False)
+            print("✅ Successfully authenticated with HuggingFace")
+        except Exception as login_error:
+            print(f"Warning: Could not login via API: {login_error}")
+            # Continue anyway, token might still work
+        
         print("Loading FLUX.2-dev-bnb-4bit model...")
         print("This may take a few minutes on first run...")
         
@@ -59,7 +84,8 @@ def initialize_pipeline():
         pipe = Flux2Pipeline.from_pretrained(
             REPO_ID,
             text_encoder=None,  # Use remote text encoder
-            torch_dtype=TORCH_DTYPE
+            torch_dtype=TORCH_DTYPE,
+            token=hf_token
         ).to(DEVICE)
         
         # Enable memory efficient attention if available
@@ -72,7 +98,13 @@ def initialize_pipeline():
         return "✅ Pipeline initialized successfully! Ready to generate images."
     
     except Exception as e:
-        return f"❌ Error initializing pipeline: {str(e)}\n\nMake sure you:\n1. Have accepted the model license at https://huggingface.co/black-forest-labs/FLUX.2-dev\n2. Are logged in with 'huggingface-cli login'"
+        error_msg = str(e)
+        if "401" in error_msg or "unauthorized" in error_msg.lower() or "authentication" in error_msg.lower():
+            return f"❌ Authentication failed: {error_msg}\n\nPlease check:\n1. Your token is correct\n2. You have accepted the license at https://huggingface.co/black-forest-labs/FLUX.2-dev"
+        elif "403" in error_msg or "forbidden" in error_msg.lower():
+            return f"❌ Access denied: {error_msg}\n\nPlease make sure you have accepted the model license at https://huggingface.co/black-forest-labs/FLUX.2-dev"
+        else:
+            return f"❌ Error initializing pipeline: {error_msg}\n\nMake sure you:\n1. Have accepted the model license at https://huggingface.co/black-forest-labs/FLUX.2-dev\n2. Entered a valid HuggingFace token"
 
 def text_to_image(
     prompt,
@@ -93,7 +125,7 @@ def text_to_image(
     try:
         # Get prompt embeddings from remote encoder
         prompt_list = [prompt] * num_images
-        prompt_embeds = remote_text_encoder(prompt_list)
+        prompt_embeds = remote_text_encoder(prompt_list, token=hf_token)
         
         # Set random seed for reproducibility
         generator = torch.Generator(device=DEVICE).manual_seed(seed) if seed >= 0 else None
@@ -137,7 +169,7 @@ def image_to_image(
     
     try:
         # Get prompt embeddings
-        prompt_embeds = remote_text_encoder([prompt])
+        prompt_embeds = remote_text_encoder([prompt], token=hf_token)
         
         # Prepare input image
         if isinstance(input_image, np.ndarray):
@@ -195,19 +227,39 @@ with gr.Blocks(title="FLUX.2-dev-NVFP4 Image Generator", theme=gr.themes.Soft())
     - Multi-reference support
     - Remote text encoder (saves VRAM)
     
-    **Note:** You must accept the license at [HuggingFace](https://huggingface.co/black-forest-labs/FLUX.2-dev) and login with `huggingface-cli login`
+    **Note:** You must accept the license at [HuggingFace](https://huggingface.co/black-forest-labs/FLUX.2-dev) and provide your access token below.
     """)
     
     # System info
     with gr.Row():
         system_info = gr.Markdown(get_system_info())
     
+    # HuggingFace Token Input
+    with gr.Row():
+        with gr.Column():
+            hf_token_input = gr.Textbox(
+                label="🔑 HuggingFace Access Token",
+                placeholder="Enter your HuggingFace token here (hf_...)",
+                type="password",
+                info="Get your token from: https://huggingface.co/settings/tokens",
+                value=""
+            )
+            gr.Markdown("""
+            **How to get your token:**
+            1. Go to [HuggingFace Settings](https://huggingface.co/settings/tokens)
+            2. Click "New token"
+            3. Name it (e.g., "flux2-ui")
+            4. Select "Read" permissions
+            5. Copy the token and paste it above
+            6. Make sure you've accepted the [FLUX.2-dev license](https://huggingface.co/black-forest-labs/FLUX.2-dev)
+            """)
+    
     # Initialize button
     with gr.Row():
-        init_button = gr.Button("🚀 Initialize Pipeline (Click First!)", variant="primary", size="lg")
-        init_status = gr.Textbox(label="Status", interactive=False)
+        init_button = gr.Button("🚀 Initialize Pipeline (Click After Entering Token!)", variant="primary", size="lg")
+        init_status = gr.Textbox(label="Status", interactive=False, lines=5)
     
-    init_button.click(fn=initialize_pipeline, outputs=init_status)
+    init_button.click(fn=initialize_pipeline, inputs=[hf_token_input], outputs=init_status)
     
     # Main interface
     with gr.Tabs():
@@ -423,7 +475,8 @@ if __name__ == "__main__":
     print(get_system_info())
     print("\nMake sure you have:")
     print("1. Accepted the license at: https://huggingface.co/black-forest-labs/FLUX.2-dev")
-    print("2. Logged in with: huggingface-cli login")
+    print("2. Created an access token at: https://huggingface.co/settings/tokens")
+    print("3. Enter your token in the UI before initializing the pipeline")
     print("\nLaunching interface...")
     
     demo.launch(
