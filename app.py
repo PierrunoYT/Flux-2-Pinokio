@@ -139,9 +139,12 @@ def initialize_pipeline(hf_token_input):
         # Enable memory efficient attention if available
         try:
             pipe.enable_xformers_memory_efficient_attention()
-            print("XFormers memory efficient attention enabled")
-        except:
-            print("XFormers not available, using default attention")
+            print("✅ XFormers memory efficient attention enabled")
+        except Exception as xformers_error:
+            print(f"⚠️ XFormers not available, using default attention")
+            print(f"   (This is optional but can improve memory efficiency)")
+            print(f"   To install xformers, run: pip install xformers")
+            print(f"   Error: {str(xformers_error)}")
         
         return "✅ Pipeline initialized successfully! Ready to generate images."
     

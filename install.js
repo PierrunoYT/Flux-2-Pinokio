@@ -21,12 +21,14 @@ module.exports = {
     },
     // Install PyTorch with CUDA support (platform-specific)
     // torch.js handles platform detection and installs appropriate PyTorch version
+    // xformers enabled for memory-efficient attention
     {
       method: "script.start",
       params: {
         uri: "torch.js",
         params: {
-          venv: "env"
+          venv: "env",
+          xformers: true  // Enable xformers for memory-efficient attention
         }
       }
     },
