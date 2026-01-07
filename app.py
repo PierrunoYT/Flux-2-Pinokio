@@ -15,6 +15,8 @@ import numpy as np
 from huggingface_hub import get_token, login
 import requests
 import io
+import time
+import pickle
 
 # Configuration
 REPO_ID = "diffusers/FLUX.2-dev-bnb-4bit"  # 4-bit quantized model
@@ -25,30 +27,76 @@ TORCH_DTYPE = torch.bfloat16
 pipe = None
 hf_token = None  # Store HuggingFace token
 
-def remote_text_encoder(prompts, token=None):
+def remote_text_encoder(prompts, token=None, max_retries=3):
     """
     Use remote text encoder to save VRAM.
     This offloads the large text encoder to HuggingFace's servers.
     """
-    try:
-        # Use provided token, or try to get from environment
-        auth_token = token or hf_token or get_token()
-        if not auth_token:
-            raise Exception("No HuggingFace token provided. Please enter your token in the UI.")
-        
-        response = requests.post(
-            "https://remote-text-encoder-flux-2.huggingface.co/predict",
-            json={"prompt": prompts if isinstance(prompts, list) else [prompts]},
-            headers={
-                "Authorization": f"Bearer {auth_token}",
-                "Content-Type": "application/json"
-            },
-            timeout=30
-        )
-        prompt_embeds = torch.load(io.BytesIO(response.content))
-        return prompt_embeds.to(DEVICE)
-    except Exception as e:
-        raise Exception(f"Remote text encoder error: {str(e)}\nMake sure you've entered a valid HuggingFace token.")
+    # Use provided token, or try to get from environment
+    auth_token = token or hf_token or get_token()
+    if not auth_token:
+        raise Exception("No HuggingFace token provided. Please enter your token in the UI.")
+    
+    prompt_list = prompts if isinstance(prompts, list) else [prompts]
+    
+    # Retry logic with exponential backoff
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                "https://remote-text-encoder-flux-2.huggingface.co/predict",
+                json={"prompt": prompt_list},
+                headers={
+                    "Authorization": f"Bearer {auth_token}",
+                    "Content-Type": "application/json"
+                },
+                timeout=60,  # Increased timeout
+                stream=False  # Don't stream to ensure complete response
+            )
+            
+            # Check response status
+            response.raise_for_status()
+            
+            # Verify response content is not empty
+            if not response.content:
+                raise Exception("Empty response from remote text encoder")
+            
+            # Check content length header if available
+            content_length = response.headers.get('Content-Length')
+            if content_length and len(response.content) < int(content_length):
+                raise Exception(f"Response incomplete: received {len(response.content)} bytes, expected {content_length}")
+            
+            # Try to load the pickle data
+            try:
+                prompt_embeds = torch.load(io.BytesIO(response.content), map_location=DEVICE)
+                # Verify the loaded data is valid
+                if prompt_embeds is None:
+                    raise Exception("Failed to load prompt embeddings from response")
+                return prompt_embeds.to(DEVICE)
+            except (pickle.UnpicklingError, EOFError, RuntimeError) as pickle_error:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    print(f"Pickle loading failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise Exception(f"Failed to load pickle data after {max_retries} attempts: {str(pickle_error)}\n"
+                                  f"Response size: {len(response.content)} bytes\n"
+                                  f"This might be a network issue. Try again or check your internet connection.")
+            
+        except requests.exceptions.RequestException as req_error:
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                print(f"Request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            else:
+                raise Exception(f"Remote text encoder request failed after {max_retries} attempts: {str(req_error)}\n"
+                              f"Check your internet connection and try again.")
+        except Exception as e:
+            # For other exceptions, don't retry
+            raise Exception(f"Remote text encoder error: {str(e)}\nMake sure you've entered a valid HuggingFace token.")
+    
+    raise Exception(f"Remote text encoder failed after {max_retries} attempts")
 
 def initialize_pipeline(hf_token_input):
     """Initialize the FLUX.2 pipeline with optimizations for 24GB VRAM"""
