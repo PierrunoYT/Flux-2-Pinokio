@@ -9,6 +9,16 @@ module.exports = {
         ],
       }
     },
+    // Install dependencies for FLUX.2-dev
+    {
+      method: "shell.run",
+      params: {
+        venv: "env",
+        message: [
+          "pip install -r requirements.txt"
+        ],
+      }
+    },
     // Install PyTorch with CUDA support (platform-specific)
     // torch.js handles platform detection and installs appropriate PyTorch version
     {
@@ -18,16 +28,6 @@ module.exports = {
         params: {
           venv: "env"
         }
-      }
-    },
-    // Install dependencies for FLUX.2-dev
-    {
-      method: "shell.run",
-      params: {
-        venv: "env",
-        message: [
-          "pip install -r requirements.txt"
-        ],
       }
     },
     {
